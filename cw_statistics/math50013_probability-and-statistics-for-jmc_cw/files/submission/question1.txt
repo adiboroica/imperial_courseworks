@@ -1,0 +1,4 @@
+Question 1 (d) :
+    estimate of the integral:  1.6936228751468119
+    95% confidence interval:  (1.1776665653117973, 2.2095791849818265)
+

@@ -1,0 +1,531 @@
+---
+title: "Appendix: R Code"
+output: 
+  bookdown::pdf_book:
+    toc: false
+    fontsize: 10pt
+    includes:
+      in_header: code.sty
+editor_options: 
+  # chunk_output_type: console
+  chunk_output_type: inline
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+ans<-TRUE
+```
+
+```{r}
+# Import the necessary libraries
+library(boot)
+library(ggplot2)
+library(gridExtra)
+library(MASS)
+if (!require("MVN")) {
+  install.packages("MVN")
+}
+library(MVN)
+```
+
+# Load the data and extract the variables
+
+```{r}
+# Load the data
+load("1854554.RData")
+
+# Tell R that treatment is categorical
+dat$treatment <- as.factor(dat$treatment)
+# Add the pulse difference to the data frame
+dat$pulse_diff = dat$stimulated_pulse - dat$rest_pulse
+
+# Attach the data frame
+attach(dat)
+```
+
+```{r}
+# View the data
+# View(dat)
+```
+
+# Exploratory analysis of the data
+
+```{r}
+# Print the first few rows of the data
+head(dat)
+```
+
+```{r}
+# Summary of the data
+summary(dat)
+```
+
+```{r}
+par(mfrow = c(1, 3)) 
+
+# Box plot for BMI by Treatment
+boxplot(bmi ~ treatment, main = "BMI",
+        xlab = "Treatment", ylab = "BMI")
+
+# Box plot for Resting Pulse by Treatment
+boxplot(rest_pulse ~ treatment, main = "Resting Pulse",
+        xlab = "Treatment", ylab = "Resting Pulse")
+
+# Box plot for Stimulated Pulse by Treatment
+boxplot(stimulated_pulse ~ treatment, main = "Stimulated Pulse",
+        xlab = "Treatment", ylab = "Stimulated Pulse")
+```
+
+```{r}
+# Plot the pulse difference
+plot(pulse_diff ~ bmi, xlab = "BMI", ylab = "Pulse Difference")
+```
+
+```{r}
+remove_outliers <- function(df, column_name) {
+  Q1 <- quantile(df[[column_name]], 0.25)
+  Q3 <- quantile(df[[column_name]], 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  df <- df[df[[column_name]] >= lower_bound & df[[column_name]] <= upper_bound, ]
+  return(df)
+}
+
+# Remove the outliers
+# dat <- remove_outliers(dat, "bmi")
+# dat <- remove_outliers(dat, "rest_pulse")
+# dat <- remove_outliers(dat, "stimulated_pulse")
+# Attach the data frame
+# attach(dat)
+```
+
+```{r}
+# Set up the plot area
+par(mfrow = c(2, 2))
+
+# Scatter plots for the rest pulse
+plot(rest_pulse[treatment == 0], stimulated_pulse[treatment == 0],
+     xlab = "Rest Pulse", ylab = "Stimulated Pulse",
+     main = 1, xlim = range(rest_pulse), ylim = range(stimulated_pulse))
+plot(rest_pulse[treatment == 1], stimulated_pulse[treatment == 1],
+     xlab = "Rest Pulse", ylab = "Stimulated Pulse",
+     main = 0, xlim = range(rest_pulse), ylim = range(stimulated_pulse))
+
+# Scatter plots for the BMI
+plot(bmi[treatment == 0], stimulated_pulse[treatment == 0],
+     xlab = "BMI", ylab = "Stimulated Pulse",
+     main = 1, xlim = range(bmi), ylim = range(stimulated_pulse))
+plot(bmi[treatment == 1], stimulated_pulse[treatment == 1],
+     xlab = "BMI", ylab = "Stimulated Pulse",
+     main = 0, xlim = range(bmi), ylim = range(stimulated_pulse))
+```
+
+# Initial model suggested by the clinician
+
+```{r}
+# Fit the initial linear model
+fit0 <- lm(stimulated_pulse ~ rest_pulse + treatment)
+```
+
+```{r}
+# Set up the plot area
+par(mfrow = c(2, 2))
+
+# Summary of the initial model
+summary(fit0)
+
+# Plot the initial model
+par(mfrow = c(2, 2))
+plot(fit0)
+```
+
+# Model suggested by the statistician
+
+```{r}
+custom_glm_model <-
+  function(X,
+           y,
+           max_iter = 100,
+           tol = 1e-4,
+           eps = 1e-6) {
+    # Initialize mu and eta
+    mu <- rep(mean(y), length(y))
+    eta <- 1 / mu  
+    
+    # Initialize beta
+    beta <- rep(0, ncol(X))
+    
+    for (i in 1:max_iter) {
+      # Update the adjusted dependent variable z
+      z <- eta - ((y - mu) / mu ^ 2)
+      
+      # Update the weights
+      w <-  mu ^ 2
+      
+      # Update the model using a weighted least squares fit
+      WLS_fit <- lm(z ~ bmi + treatment, weights = w)
+      new_beta <- as.numeric(WLS_fit$coeff)
+      
+      # Check if the coefficients have converged
+      if (max(abs(new_beta - beta)) < tol) {
+        return(new_beta)
+      }
+      
+      # Update the coefficients
+      beta <- new_beta
+      
+      # Update the linear predictor
+      eta <- X %*% beta
+      
+      # Update the mean
+      mu <- 1 / eta
+    }
+    
+    return (beta)
+  }
+
+X <- cbind(1, bmi, treatment)
+y <- pulse_diff
+
+# Fit the custom GLM model
+coeffs <- custom_glm_model(X, y, max_iter=1000)
+coeffs
+```
+
+The algorithm converges pretty rapidly and we get similar coefficients
+to the ones obtained by the R's `glm` function. Hence, from now on, we
+will use the `glm` function to fit the models.
+
+```{r}
+# Fit the GLM model
+fit1_form <- (pulse_diff ~ bmi + treatment)
+fit1 <- glm(fit1_form, family = Gamma(link = "inverse"), data = dat)
+
+# Summary of the GLM model
+summary(fit1)
+
+# Plot the GLM model
+par(mfrow = c(2, 2))
+plot(fit1)
+```
+
+# Estimation of the treatment effect
+
+```{r}
+ci_bootstrap <- function(data, fit_form, num_iterations = 1000, seed=60012) {
+  # Set the seed for reproducibility
+  set.seed(seed)
+  
+  # Compute the typical BMI (mean BMI for the sample)
+  typical_bmi <- mean(bmi)
+  
+  # Extract the number of points in the data
+  num_points <- nrow(dat)
+  
+  # Create an empty vector to store the predicted differences
+  predicted_diff <- numeric(num_iterations)
+  
+  for (i in 1:num_iterations) {
+    # Sample the data with replacement
+    indexes <- sample(num_points, num_points, replace = TRUE)
+    
+    # Train the model
+    fit_i <- glm(fit_form, family = Gamma(link = "inverse"), data = data[indexes,])
+    
+    # Predict the difference in pulse
+    new_data <- data.frame(bmi = typical_bmi,
+                           treatment = factor(c(0, 1),levels = levels(treatment)))
+    
+    predictions <- predict(fit_i, newdata = new_data, type = "response")
+    predicted_diff[i] <- predictions[1] - predictions[2]
+  }
+  
+  # Compute the estimated difference
+  estimated_diff <- mean(predicted_diff)
+  
+  # Compute the 95% confidence interval
+  conf_interval <- quantile(predicted_diff, c(0.025, 0.975))
+  
+  return(list(estimated_diff = estimated_diff,
+              conf_interval = conf_interval))
+}
+
+ci_bootstrap(dat, fit1_form, num_iterations = 1000)
+```
+
+# Changing the linear predictors
+
+```{r}
+# Fit the GLM model
+fit2 <- glm(pulse_diff ~ bmi, family = Gamma(link = "inverse"), data = dat)
+
+# Summary of the GLM model
+summary(fit2)
+
+# Plot the GLM model
+par(mfrow = c(2, 2))
+plot(fit2)
+```
+
+```{r}
+# Fit the GLM model
+fit3 <- glm(pulse_diff ~ treatment, family = Gamma(link = "inverse"), data = dat)
+
+# Summary of the GLM model
+summary(fit3)
+
+# Plot the GLM model
+par(mfrow = c(2, 2))
+plot(fit3)
+```
+
+```{r}
+# Fit the GLM model
+fit4_form <- (pulse_diff ~ bmi * treatment)
+fit4 <- glm(fit4_form, family = Gamma(link = "inverse"), data = dat)
+
+summary(fit4)
+
+# Plot the GLM model
+par(mfrow = c(2, 2))
+plot(fit4)
+```
+
+Now let's compare the models.
+
+```{r}
+# Compare the models
+anova(fit1, fit2, fit3, fit4)
+AIC(fit1, fit2, fit3, fit4)
+```
+
+```{r}
+# Pick the best model
+fit_form <- fit4_form
+fit <- fit4
+
+# Make confidence intervals for the coefficients
+confint(fit, level = 0.95)
+```
+
+# Expected increase in heart rate
+
+```{r}
+# Plot the difference in heart rate as a function of BMI
+par(mfrow = c(1, 2))
+plot(bmi[treatment == 1], pulse_diff[treatment == 1],
+     xlab = "BMI", ylab = "Pulse Difference",
+     main = 1, xlim = range(bmi), ylim = range(pulse_diff))
+plot(bmi[treatment == 0], pulse_diff[treatment == 0],
+     xlab = "BMI", ylab = "Pulse Difference",
+     main = 0, xlim = range(bmi), ylim = range(pulse_diff))
+```
+
+```{r}
+make_predictions <- function(fit, range) {
+  # Prepare a data frame for prediction: repeat each BMI for both treatment levels
+  data_stimulant = data.frame(bmi = range, treatment = factor(0, levels = levels(treatment)))
+  data_placebo = data.frame(bmi = range, treatment = factor(1, levels = levels(treatment)))
+
+  # Predict heart rate increase for the new data
+  predictions_stimulant = predict(fit, newdata = data_stimulant, type = "response")
+  predictions_placebo = predict(fit, newdata = data_placebo, type = "response")
+
+  # Combine the prediction data frames into one, 
+  # adding a column to distinguish between stimulant and placebo
+  data_combined <- rbind(data_stimulant, data_placebo)
+  data_combined$treatment <- factor(data_combined$treatment, labels = c(0, 1))
+
+  # Add the predictions as a new column in the combined data frame
+  data_combined$expected_increase <- c(predictions_stimulant, predictions_placebo)
+  
+  return (data_combined)
+}
+
+plot_predictions <- function(data_combined) {
+  # Use ggplot2 to plot the expected increase in heart rate as a function of BMI
+  return (ggplot(data_combined, aes(x = bmi, y = expected_increase, color = treatment)) +
+    geom_line() +
+    labs(title = "Expected Increase in Heart Rate",
+         x = "BMI",
+         y = "Expected Increase in Heart Rate") +
+    scale_color_manual(values = c("blue","red")) +
+    theme_minimal() +
+    guides(color = guide_legend(title = "Treatment")))
+}
+
+# Make predictions
+predictions_1 <- make_predictions(fit, range = seq(from = 15, to = 25, by=0.5))
+predictions_2 <- make_predictions(fit, range = seq(from = 5, to = 40, by=0.5))
+
+# Plot these values on the same graph
+grid.arrange(plot_predictions(predictions_1), plot_predictions(predictions_2), ncol = 2)
+```
+
+# Simulation study to to determine the size of treatment effect
+
+```{r}
+# Set the seed
+set.seed(5039)
+
+num_simulations <- 600
+treatment_effects <- seq(from = 0.1, to = 20, by = 0.1)
+
+# Create an empty vector to store the results
+power <- numeric(length(treatment_effects))
+
+# Run the simulations
+for (i in seq_along(treatment_effects)) {
+  effect_size <- treatment_effects[i]
+  insignificant_count <- 0
+  
+  # Run the simulations for the current effect size
+  for (j in 1:num_simulations) {
+    # Create a copy of the dataset for manipulation
+    sim_data <- dat
+    
+    # Simulate the response variable
+    sim_data$pulse_diff_sim <- unlist(simulate(fit))
+    
+    # Update the response variable for the placebo group 
+    # (we're bringing them to the same level as the stimulant group)
+    # Notice that we're adding the treatment effect to the placebo group because
+    # if we would subtract it from the stimulant group, 
+    # we would encounter errors with the Gamma model fitting.
+    indexes <- sim_data$treatment == 1
+    sim_data$pulse_diff_sim[indexes] <- sim_data$pulse_diff_sim[indexes] + effect_size
+    
+    # Fit the model to the simulated data
+    form = pulse_diff_sim ~ bmi * treatment
+    fit_sim <- glm(form, family = Gamma(link = "inverse"), data = sim_data)
+    
+    treatment_is_insignificant <- summary(fit_sim)$coefficients["treatment1", "Pr(>|t|)"] > 0.05
+    bmi_treatment_interaction_is_insignificant <- summary(fit_sim)$coefficients["bmi:treatment1", "Pr(>|t|)"] > 0.05
+    
+    # Check if the treatment effect is insignificant
+    if (treatment_is_insignificant && bmi_treatment_interaction_is_insignificant) {
+      insignificant_count <- insignificant_count + 1
+    }
+  }
+  
+  # Store the power for the current effect size
+  power[i] <- insignificant_count / num_simulations
+}
+```
+
+```{r}
+# Print the treatment effect after which the power is greater than 0.05
+treatment_effects[which(power > 0.05)[1:10]]
+
+# Print the treatment effect after which the power is greater than 0.6
+treatment_effects[which(power > 0.6)[1:10]]
+
+# Plot the power
+par(mfrow = c(1, 1))
+plot(treatment_effects, power, type = "l", xlab = "Treatment Effect", ylab = "Power", col = "blue", lwd = 2)
+abline(h = 0.05, lty = 2) # Add a horizontal line at 0.05
+```
+
+# Simulation to assess the suitability of the commonly used asymptotic approximations for the sampling distribution of the maximum likelihood esimators and scaled deviance in this problem
+
+```{r}
+# Set the seed for reproducibility
+set.seed(604859)
+
+# Pick the model
+model <- fit
+
+# Set the number of simulations
+num_sim <- 1000
+
+# Extract some useful quantities
+num_subjects <- nrow(dat)
+num_coeffs = model$rank
+dof = num_subjects - num_coeffs
+coeff_names <- rownames(summary(model)$coefficients)
+
+# Create empty matrices to store the results
+coeffs_sim <- matrix(nrow = num_sim, ncol=num_coeffs)
+dev_sim <- numeric(num_sim)
+
+# Run the simulations
+for (i in 1:num_sim) {
+  # Simulate the output variable
+  diff_sim <- unlist(simulate(model))
+  
+  # Fit the model to the simulated data
+  form = diff_sim ~ bmi * treatment
+  fit_sim <- glm(form, family = Gamma(link = "inverse"), data = dat)
+  summary_fit_sim <- summary(fit_sim)
+  
+  # Get the dispersion parameter
+  dispersion <- summary_fit_sim$dispersion
+  
+  # Store the coefficients 
+  coeffs_sim[i,] <- coef(fit_sim)
+  # Store the scaled deviance
+  dev_sim[i] <- summary_fit_sim$deviance / dispersion
+}
+```
+
+```{r}
+# Plot the pairs of coefficients
+pairs(coeffs_sim)
+
+# Compare the residuals to the normal distribution
+par(mfrow = c(2,ifelse(num_coeffs %% 2 == 0, num_coeffs / 2, (num_coeffs + 1) / 2)))
+for(j in 1:num_coeffs){
+  qqnorm(coeffs_sim[,j], main=paste("Normal QQ Plot -", coeff_names[j]))
+  qqline(coeffs_sim[,j], col = "red")
+}
+
+# Perform the Kolmogorov-Smirnov test for the residuals
+for(j in 1:num_coeffs){
+  standardized_residuals <- (coeffs_sim[,j] - mean(coeffs_sim[,j])) / sd(coeffs_sim[,j])
+  print(paste("Kolmogorov-Smirnov test p-value for coefficients", 
+              coeff_names[j], ": ", 
+              ks.test(standardized_residuals, "pnorm")$p.value))
+}
+
+# Perform a test from the MVN package in order to check the multivariate normality
+mvn(coeffs_sim, mvnTest = "mardia", desc=TRUE)$multivariateNormality
+```
+
+```{r}
+
+# Plot the histogram of simulated deviances
+par(mfrow = c(1, 1))
+hist(dev_sim, breaks=40, probability = TRUE, 
+     main="Histogram of Simulated Scaled Deviances",
+     xlab="Scaled Deviance")
+# Overlay the chi-squared distribution
+curve(dchisq(x, df=dof), add=TRUE, col="red", lwd=2)
+
+# Compare the scaled deviance to the chi-squared distribution
+par(mfrow = c(1, 1))
+chi_sq_quantiles <- qchisq(ppoints(dev_sim), df = dof)
+qqplot(chi_sq_quantiles, dev_sim)
+qqline(dev_sim, col = "red")
+
+# Perform a Kolmogorov-Smirnov test
+ks.test(dev_sim, "pchisq", dof)
+```
+
+# Relationship between BMI and resting pulse
+
+```{r}
+# Print the correlation between BMI and resting pulse
+cor(bmi, rest_pulse)
+
+# Print the resting pulse as a function of BMI
+par(mfrow = c(1, 2))
+plot(bmi[treatment == 0], rest_pulse[treatment == 0],
+     xlab = "BMI", ylab = "Resting Pulse",
+     main = "Treatment", xlim = range(bmi), ylim = range(rest_pulse))
+plot(bmi[treatment == 1], rest_pulse[treatment == 1],
+     xlab = "BMI", ylab = "Resting Pulse",
+     main = "Placebo", xlim = range(bmi), ylim = range(rest_pulse))
+```

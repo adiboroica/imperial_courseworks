@@ -1,0 +1,11 @@
+Question 3 (e) i. :
+    Rejection region with Type I error 5%: ( 2.83779124447156 , + infinity )
+
+Question 3 (e) ii. :
+    The power of the test is:  0.9638
+
+Question 3 (e) iii. :
+    The MLE of this observation is:  2.478118666755411
+    Since the MLE is not in the rejection region, there is insufficient evidence to reject null hypothesis at the 5% level
+    The p-value of this observation is:  0.1419 (that is, 14.19 %)
+
